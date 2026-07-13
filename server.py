@@ -664,14 +664,13 @@ SOURCES = {
 }
 
 
-# ---------------------------------------------------------------- Flask routes
-@app.route('/api/search')
-def api_search():
-    q = request.args.get('q', '').strip()
+def run_search(q, wanted=None, custom_urls=None):
+    """ดึงราคาสดจากทุกแหล่งพร้อมกัน — ใช้ได้ทั้งจาก Flask route และ Streamlit"""
+    q = (q or '').strip()
     if not q:
-        return jsonify({'results': [], 'errors': [], 'source_status': {}})
-    wanted = request.args.get('sources', ','.join(SOURCES)).split(',')
-    custom_urls = [u for u in request.args.get('custom', '').split('|') if u.strip()]
+        return {'results': [], 'errors': [], 'source_status': {}}
+    wanted = wanted if wanted is not None else list(SOURCES)
+    custom_urls = [u for u in (custom_urls or []) if u.strip()]
     source_status = {
         'sirichai': make_source_status('no_result', 0, 'ไม่ได้เลือกแหล่งนี้'),
         'ranfaifa': make_source_status('no_result', 0, 'ไม่ได้เลือกแหล่งนี้'),
@@ -711,7 +710,16 @@ def api_search():
         r['fetched_at'] = today()
     results = dedupe_results(results)
     results.sort(key=lambda x: (x['price'] is None, x['price'] or 0, x.get('name', '')))
-    return jsonify({'results': results, 'errors': errors, 'source_status': source_status})
+    return {'results': results, 'errors': errors, 'source_status': source_status}
+
+
+# ---------------------------------------------------------------- Flask routes
+@app.route('/api/search')
+def api_search():
+    q = request.args.get('q', '').strip()
+    wanted = request.args.get('sources', ','.join(SOURCES)).split(',')
+    custom_urls = [u for u in request.args.get('custom', '').split('|') if u.strip()]
+    return jsonify(run_search(q, wanted, custom_urls))
 
 
 # ---------------------------------------------------------------- library
