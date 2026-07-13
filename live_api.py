@@ -19,6 +19,9 @@ import tornado.web
 from server import run_search
 
 
+_ORIGINAL_FIND_HANDLER = None
+
+
 class SearchHandler(tornado.web.RequestHandler):
     async def get(self) -> None:
         q = self.get_argument("q", "")
@@ -33,6 +36,18 @@ class SearchHandler(tornado.web.RequestHandler):
 
 def install_search_api() -> bool:
     """จดทะเบียน /api/search เข้า Tornado app ของ Streamlit (เรียกซ้ำได้ปลอดภัย)"""
+    global _ORIGINAL_FIND_HANDLER
+
+    if _ORIGINAL_FIND_HANDLER is None:
+        _ORIGINAL_FIND_HANDLER = tornado.web.Application.find_handler
+
+        def find_handler_with_live_search(app, request, **kwargs):
+            if request.path == "/api/search":
+                return app.get_handler_delegate(request, SearchHandler, {})
+            return _ORIGINAL_FIND_HANDLER(app, request, **kwargs)
+
+        tornado.web.Application.find_handler = find_handler_with_live_search
+
     installed = False
     for obj in gc.get_objects():
         if isinstance(obj, tornado.web.Application):
