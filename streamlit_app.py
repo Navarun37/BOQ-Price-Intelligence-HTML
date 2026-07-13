@@ -19,6 +19,8 @@ import streamlit.components.v1 as components
 
 HTML_FILE = Path(__file__).parent / "BOQ_price_finder.html"
 PROTOCOL_CHECK = "return location.protocol === 'http:' || location.protocol === 'https:';"
+FETCH_CALL = "await fetch('/api/search?q='+encodeURIComponent(q)+'&sources='+sources+'&custom='+encodeURIComponent(custom))"
+FETCH_WITH_TIMEOUT = FETCH_CALL[:-1] + ", {signal: AbortSignal.timeout(90000)})"
 
 st.set_page_config(
     page_title="BOQ Price Finder",
@@ -45,6 +47,8 @@ def load_html(live: bool) -> str:
         # srcdoc iframe มี protocol เป็น about: -> เปิดทางเรียก live backend
         # (ถ้าเรียกไม่สำเร็จ โค้ดในหน้า fallback ไปค้นข้อมูลฝังในไฟล์เอง)
         html = html.replace(PROTOCOL_CHECK, "return true;", 1)
+        # กัน scraping ค้าง: เกิน 90 วิ ให้ abort แล้ว fallback ไปผล offline
+        html = html.replace(FETCH_CALL, FETCH_WITH_TIMEOUT, 1)
     return html
 
 
