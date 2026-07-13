@@ -13,6 +13,7 @@ import asyncio
 import gc
 import json
 
+import tornado.routing
 import tornado.web
 
 from server import run_search
@@ -35,6 +36,21 @@ def install_search_api() -> bool:
     installed = False
     for obj in gc.get_objects():
         if isinstance(obj, tornado.web.Application):
+            rules = getattr(getattr(obj, "wildcard_router", None), "rules", None)
+            if rules is not None:
+                exists = any(
+                    getattr(getattr(rule, "matcher", None), "_path", "") == r"/api/search"
+                    for rule in rules
+                )
+                if not exists:
+                    # Streamlit มี catch-all route สำหรับ frontend อยู่ท้าย/กลาง list
+                    # จึงต้อง prepend ไม่ใช่ add_handlers() ที่ append แล้วโดน catch-all กลบ
+                    rules.insert(0, tornado.routing.Rule(
+                        tornado.routing.PathMatches(r"/api/search"),
+                        SearchHandler,
+                    ))
+                installed = True
+                continue
             obj.add_handlers(r".*", [(r"/api/search", SearchHandler)])
             installed = True
     return installed

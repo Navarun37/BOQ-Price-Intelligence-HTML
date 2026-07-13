@@ -30,7 +30,6 @@ st.set_page_config(
 )
 
 
-@st.cache_resource
 def setup_live_search() -> bool:
     """เปิด /api/search ถ้าทำได้ — ล้มเหลวเมื่อไรก็ตกไปโหมด offline เฉย ๆ"""
     try:
@@ -40,15 +39,13 @@ def setup_live_search() -> bool:
         return False
 
 
-@st.cache_data
-def load_html(live: bool) -> str:
+def load_html() -> str:
     html = HTML_FILE.read_text(encoding="utf-8")
-    if live:
-        # srcdoc iframe มี protocol เป็น about: -> เปิดทางเรียก live backend
-        # (ถ้าเรียกไม่สำเร็จ โค้ดในหน้า fallback ไปค้นข้อมูลฝังในไฟล์เอง)
-        html = html.replace(PROTOCOL_CHECK, "return true;", 1)
-        # กัน scraping ค้าง: เกิน 90 วิ ให้ abort แล้ว fallback ไปผล offline
-        html = html.replace(FETCH_CALL, FETCH_WITH_TIMEOUT, 1)
+    # srcdoc iframe มี protocol เป็น about: -> เปิดทางให้ลองเรียก live backend เสมอ
+    # ถ้า /api/search ยังไม่พร้อม โค้ดในหน้า fallback ไปค้นข้อมูลฝังในไฟล์เอง
+    html = html.replace(PROTOCOL_CHECK, "return true;", 1)
+    # กัน scraping ค้าง: เกิน 90 วิ ให้ abort แล้ว fallback ไปผล offline
+    html = html.replace(FETCH_CALL, FETCH_WITH_TIMEOUT, 1)
     return html
 
 
@@ -79,4 +76,4 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-components.html(load_html(live_ready), height=900, scrolling=True)
+components.html(load_html(), height=900, scrolling=True)
