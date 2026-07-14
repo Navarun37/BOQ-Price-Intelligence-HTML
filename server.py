@@ -38,6 +38,38 @@ MENU_TEXT_RE = re.compile(
 PRICE_UNIT_RE = re.compile(r'([\d,]+(?:\.\d+)?)\s*/\s*([^\s,|]+)', re.I)
 GENERIC_NAME_RE = re.compile(r'^(ชนิด|รายการ|ขนาด|ราคา|model|code|type|spec|description)$', re.I)
 
+# ---------------------------------------------------------------- relevance layer config
+# กลุ่มคำค้น -> คำพ้อง/สเปกที่นับเป็น match ได้ (เทียบแบบคงวรรณยุกต์ ไม่ใช้ norm()
+# เพราะ norm ตัดวรรณยุกต์จน "กล้อง" กับ "กล่อง" กลายเป็นคำเดียวกัน)
+ALIAS_GROUPS = {
+    'กล้อง': ['กล้อง', 'กล้องวงจรปิด', 'CCTV', 'camera', 'IP camera', 'dome camera', 'bullet camera'],
+    'สายไฟ': ['สายไฟ', 'IEC', 'THW', 'VCT', 'VAF', 'YAZAKI', 'ยาซากิ', '60227'],
+    'ท่อ': ['ท่อ', 'EMT', 'IMC', 'PVC conduit', 'conduit'],
+    'smoke detector': ['smoke detector', 'detector', 'อุปกรณ์ตรวจจับควัน', 'อุปกรณ์ตรวจจับควันไฟ'],
+    'breaker': ['breaker', 'เบรกเกอร์', 'circuit breaker', 'Schneider'],
+}
+
+# กติกาคำต้องห้ามต่อกลุ่มคำค้น: เจอคำใน reject ในชื่อสินค้า และไม่มีคำใน unless -> ตัดทิ้ง
+NEGATIVE_RULES = {
+    'กล้อง': {
+        'reject': ['กล่อง', 'เบรกเกอร์', 'breaker', 'consumer', 'ตู้คอนซูเมอร์', 'ตู้ไฟ', 'บล็อกลอย'],
+        'unless': ['กล้อง', 'cctv', 'camera', 'วงจรปิด'],
+    },
+    'สายไฟ': {
+        'reject': ['เบรกเกอร์', 'breaker', 'schneider', 'กล่องเบรกเกอร์', 'ตู้คอนซูเมอร์', 'consumer unit'],
+        'unless': ['iec', 'thw', '60227', 'yazaki', 'ยาซากิ', 'สายไฟ'],
+    },
+}
+
+# ลำดับความน่าเชื่อถือของแหล่ง (ใช้เรียงผลหลังคะแนน relevance)
+SOURCE_PRIORITY = {
+    'YOTATHAI / OBEC 2568': 0,
+    'ราคากลาง สพฐ.2568': 0,
+    'sirichaielectric.com': 1,
+    'ranfaifa.com': 2,
+    'apelectricstore.com': 3,
+}
+
 
 # ---------------------------------------------------------------- common parser engine
 def norm(s):
@@ -235,6 +267,124 @@ def matched_terms_for_text(text, q):
         if term.lower() in hay or norm(term) in hay_norm:
             out.append(term)
     return out
+
+
+# ---------------------------------------------------------------- relevance layer
+def get_query_aliases(q):
+    """คำค้น + คำพ้องของทุกกลุ่มที่คำค้นไปตรง (เทียบคงวรรณยุกต์ เลี่ยง กล้อง/กล่อง ชนกัน)"""
+    q_l = compact_text(q or '').lower()
+    aliases = query_tokens(q)
+    if q_l:
+        for group_aliases in ALIAS_GROUPS.values():
+            if any(a.lower() in q_l for a in group_aliases):
+                aliases += group_aliases
+    seen, out = set(), []
+    for a in aliases:
+        key = a.lower()
+        if a and key not in seen:
+            seen.add(key)
+            out.append(a)
+    return out
+
+
+def get_negative_terms(q):
+    """{'reject': [...], 'unless': [...]} รวมจากทุกกลุ่มที่คำค้นไปตรง"""
+    q_l = compact_text(q or '').lower()
+    out = {'reject': [], 'unless': []}
+    if not q_l:
+        return out
+    for group, group_aliases in ALIAS_GROUPS.items():
+        rule = NEGATIVE_RULES.get(group)
+        if rule and any(a.lower() in q_l for a in group_aliases):
+            out['reject'] += [t for t in rule['reject'] if t not in out['reject']]
+            out['unless'] += [t for t in rule['unless'] if t not in out['unless']]
+    return out
+
+
+def _has_price_or_labor(item):
+    try:
+        if item.get('price') is not None and float(item['price']) > 0:
+            return True
+    except (TypeError, ValueError):
+        pass
+    return item.get('labor') is not None
+
+
+def _relevance_detail(item, q):
+    """คะแนน 0-100 + คำที่ match + เหตุผลถ้าโดนตัด
+    ให้คะแนนจาก "ชื่อสินค้า" เท่านั้น (ไม่ใช้ URL/ข้อความหน้าเพจ) และเทียบคงวรรณยุกต์"""
+    name_raw = compact_text(item.get('name', ''))
+    name = name_raw.lower()
+    q_l = compact_text(q or '').lower()
+    if not name:
+        return 0, [], 'empty name'
+    if not q_l:
+        return 100, [], None
+    if not _has_price_or_labor(item):
+        return 0, [], 'no price or labor'
+    if is_menu_text(name_raw):
+        return 0, [], 'menu/category text'
+    if len(name_raw) > 180 and not item.get('price'):
+        return 0, [], 'name too long without price'
+
+    neg = get_negative_terms(q)
+    if not any(u.lower() in name for u in neg['unless']):
+        for nt in neg['reject']:
+            if nt.lower() in name:
+                return 0, [], 'negative term: %s' % nt
+
+    tokens = query_tokens(q)
+    hits = [t for t in tokens if t in name]
+    alias_hits = [a for a in get_query_aliases(q)
+                  if a.lower() in name and a.lower() not in tokens]
+    if q_l in name:
+        score = 100
+    elif tokens and len(hits) == len(tokens):
+        score = 90
+    elif hits:
+        score = 40 + int(50.0 * len(hits) / len(tokens))
+    elif alias_hits:
+        # ไม่เจอคำค้นตรง ๆ แต่เจอคำพ้อง/สเปกในกลุ่มเดียวกัน >= 2 คำจึงจะผ่านเกณฑ์ 50
+        score = 30 + 12 * len(alias_hits)
+    else:
+        score = 0
+    if hits and alias_hits:
+        score += min(10, 2 * len(alias_hits))
+    return max(0, min(100, score)), hits + alias_hits, None
+
+
+def relevance_score(item, q):
+    return _relevance_detail(item, q)[0]
+
+
+def add_relevance_fields(results, q):
+    """ใส่ relevance_score + matched_terms ให้ทุก result (ไม่กรองทิ้ง)"""
+    for item in results:
+        score, matched, _reason = _relevance_detail(item, q)
+        item['relevance_score'] = score
+        item['matched_terms'] = sorted(set((item.get('matched_terms') or []) + matched))
+    return results
+
+
+def filter_by_relevance(results, q, min_score=50, debug=False):
+    """เก็บเฉพาะ result ที่คะแนน >= min_score และไม่ติดคำต้องห้าม
+    debug=True -> คืน (kept, rejected) โดย rejected แนบ rejected_reason"""
+    kept, rejected = [], []
+    for item in results:
+        score, matched, reason = _relevance_detail(item, q)
+        item['relevance_score'] = score
+        item['matched_terms'] = sorted(set((item.get('matched_terms') or []) + matched))
+        if reason is None and score >= min_score:
+            kept.append(item)
+        elif debug:
+            r = dict(item)
+            r['rejected_reason'] = reason or 'score %d < %d' % (score, min_score)
+            rejected.append(r)
+    return (kept, rejected) if debug else kept
+
+
+def source_priority_of(item):
+    return SOURCE_PRIORITY.get(item.get('source', ''), 5)
 
 
 def parse_html_tables(html, url, q, source_name, parser_name):
@@ -664,8 +814,9 @@ SOURCES = {
 }
 
 
-def run_search(q, wanted=None, custom_urls=None):
-    """ดึงราคาสดจากทุกแหล่งพร้อมกัน — ใช้ได้ทั้งจาก Flask route และ Streamlit"""
+def run_search(q, wanted=None, custom_urls=None, debug=False):
+    """ดึงราคาสดจากทุกแหล่งพร้อมกัน — ใช้ได้ทั้งจาก Flask route และ Streamlit
+    debug=True: แนบรายการที่ถูกกรองออกพร้อม rejected_reason ใน key 'rejected'"""
     q = (q or '').strip()
     if not q:
         return {'results': [], 'errors': [], 'source_status': {}}
@@ -678,7 +829,8 @@ def run_search(q, wanted=None, custom_urls=None):
         'apelectric': make_source_status('no_result', 0, 'ไม่ได้เลือกแหล่งนี้'),
         'custom': make_source_status('no_result', 0, 'ไม่ได้เพิ่ม Custom URL'),
     }
-    results, errors = [], []
+    results, errors, rejected_all = [], [], []
+    custom_raw_seen = 0
     with ThreadPoolExecutor(max_workers=6) as ex:
         futs = {}
         for key in wanted:
@@ -690,18 +842,36 @@ def run_search(q, wanted=None, custom_urls=None):
             source_key = futs[f]
             try:
                 found = f.result()
-                results.extend(found)
+                raw_count = len(found)
+                # ชั้นกรอง relevance: นับเข้า source_status เฉพาะผลที่ผ่านกรองจริง
+                kept, rejected = filter_by_relevance(found, q, debug=True)
+                if debug:
+                    rejected_all.extend(rejected)
+                results.extend(kept)
                 if source_key == 'custom':
+                    custom_raw_seen += raw_count
                     old = source_status['custom']
-                    count = old['result_count'] + len(found)
-                    message = '' if count else 'ไม่สามารถดึงราคาอัตโนมัติจากเว็บนี้ได้ กรุณาเปิดเว็บต้นทางและเพิ่มราคาด้วยตนเอง'
-                    source_status['custom'] = make_source_status('success' if count else 'no_result', count, message)
+                    count = old['result_count'] + len(kept)
+                    if count:
+                        source_status['custom'] = make_source_status('success', count, '')
+                    elif custom_raw_seen:
+                        source_status['custom'] = make_source_status(
+                            'filtered_out', 0,
+                            'พบ %d รายการแต่ไม่เกี่ยวกับคำค้น จึงถูกกรองออก' % custom_raw_seen)
+                    else:
+                        source_status['custom'] = make_source_status(
+                            'no_result', 0,
+                            'ไม่สามารถดึงราคาอัตโนมัติจากเว็บนี้ได้ กรุณาเปิดเว็บต้นทางและเพิ่มราคาด้วยตนเอง')
                 else:
-                    source_status[source_key] = make_source_status(
-                        'success' if found else 'no_result',
-                        len(found),
-                        '' if found else 'ไม่พบราคาที่ตรงกับคำค้น'
-                    )
+                    if kept:
+                        source_status[source_key] = make_source_status('success', len(kept), '')
+                    elif raw_count:
+                        source_status[source_key] = make_source_status(
+                            'filtered_out', 0,
+                            'พบ %d รายการแต่ไม่เกี่ยวกับคำค้น จึงถูกกรองออก' % raw_count)
+                    else:
+                        source_status[source_key] = make_source_status(
+                            'no_result', 0, 'ไม่พบราคาที่ตรงกับคำค้น')
             except Exception as e:
                 errors.append('%s: %s' % (source_key, e))
                 if source_key in source_status:
@@ -709,8 +879,18 @@ def run_search(q, wanted=None, custom_urls=None):
     for r in results:
         r['fetched_at'] = today()
     results = dedupe_results(results)
-    results.sort(key=lambda x: (x['price'] is None, x['price'] or 0, x.get('name', '')))
-    return {'results': results, 'errors': errors, 'source_status': source_status}
+    # เรียง: relevance มาก่อน -> แหล่งน่าเชื่อถือ -> ราคาต่ำก่อน (ห้ามเรียงราคาอย่างเดียว)
+    results.sort(key=lambda x: (
+        -(x.get('relevance_score') or 0),
+        source_priority_of(x),
+        x['price'] is None,
+        x['price'] or 0,
+        x.get('name', ''),
+    ))
+    out = {'results': results, 'errors': errors, 'source_status': source_status}
+    if debug:
+        out['rejected'] = rejected_all
+    return out
 
 
 # ---------------------------------------------------------------- Flask routes
@@ -719,7 +899,8 @@ def api_search():
     q = request.args.get('q', '').strip()
     wanted = request.args.get('sources', ','.join(SOURCES)).split(',')
     custom_urls = [u for u in request.args.get('custom', '').split('|') if u.strip()]
-    return jsonify(run_search(q, wanted, custom_urls))
+    debug = request.args.get('debug', '') in ('1', 'true')
+    return jsonify(run_search(q, wanted, custom_urls, debug=debug))
 
 
 # ---------------------------------------------------------------- library

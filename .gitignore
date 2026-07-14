@@ -20,6 +20,7 @@ data/price_library.json
 .vscode/
 
 # Build/cache artifacts
+.boq_component/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
