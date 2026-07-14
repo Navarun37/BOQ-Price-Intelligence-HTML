@@ -4,5 +4,6 @@ services:
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn server:app
+    # timeout ยาวเพราะ /api/search ดึงเว็บร้านสดใช้เวลาได้ถึง ~90 วินาที
+    startCommand: gunicorn server:app --timeout 180 --workers 2 --threads 8
     healthCheckPath: /
